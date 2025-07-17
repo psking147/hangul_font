@@ -33,18 +33,22 @@ class Encoder(nn.Module):
     def __init__(self, input_dim=64*64, latent_dim=128):
         super(Encoder, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, 4, 2, 1)
+        self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, 4, 2, 1)
+        self.bn2 = nn.BatchNorm2d(64)
         self.conv3 = nn.Conv2d(64, 128, 4, 2, 1)
+        self.bn3 = nn.BatchNorm2d(128)
         self.conv4 = nn.Conv2d(128, 256, 4, 2, 1)
+        self.bn4 = nn.BatchNorm2d(256)
         
         self.fc = nn.Linear(256 * 4 * 4, latent_dim)
         self.dropout = nn.Dropout(0.2)
         
     def forward(self, x):
-        x = F.leaky_relu(self.conv1(x), 0.2)
-        x = F.leaky_relu(self.conv2(x), 0.2)
-        x = F.leaky_relu(self.conv3(x), 0.2)
-        x = F.leaky_relu(self.conv4(x), 0.2)
+        x = F.leaky_relu(self.bn1(self.conv1(x)), 0.2)
+        x = F.leaky_relu(self.bn2(self.conv2(x)), 0.2)
+        x = F.leaky_relu(self.bn3(self.conv3(x)), 0.2)
+        x = F.leaky_relu(self.bn4(self.conv4(x)), 0.2)
         
         x = x.view(x.size(0), -1)
         x = self.dropout(x)
@@ -60,8 +64,11 @@ class Decoder(nn.Module):
         self.fc = nn.Linear(latent_dim + font_dim, 256 * 4 * 4)
         
         self.deconv1 = nn.ConvTranspose2d(256, 128, 4, 2, 1)
+        self.bn1 = nn.BatchNorm2d(128)
         self.deconv2 = nn.ConvTranspose2d(128, 64, 4, 2, 1)
+        self.bn2 = nn.BatchNorm2d(64)
         self.deconv3 = nn.ConvTranspose2d(64, 32, 4, 2, 1)
+        self.bn3 = nn.BatchNorm2d(32)
         self.deconv4 = nn.ConvTranspose2d(32, 1, 4, 2, 1)
         
     def forward(self, z, font_vector):
@@ -69,9 +76,9 @@ class Decoder(nn.Module):
         x = F.relu(self.fc(combined))
         x = x.view(x.size(0), 256, 4, 4)
         
-        x = F.relu(self.deconv1(x))
-        x = F.relu(self.deconv2(x))
-        x = F.relu(self.deconv3(x))
+        x = F.relu(self.bn1(self.deconv1(x)))
+        x = F.relu(self.bn2(self.deconv2(x)))
+        x = F.relu(self.bn3(self.deconv3(x)))
         x = torch.tanh(self.deconv4(x))
         
         return x
@@ -91,18 +98,22 @@ class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, 4, 2, 1)
+        # 판별자의 첫 레이어에는 보통 배치 정규화를 적용하지 않습니다.
         self.conv2 = nn.Conv2d(32, 64, 4, 2, 1)
+        self.bn2 = nn.BatchNorm2d(64)
         self.conv3 = nn.Conv2d(64, 128, 4, 2, 1)
+        self.bn3 = nn.BatchNorm2d(128)
         self.conv4 = nn.Conv2d(128, 256, 4, 2, 1)
+        self.bn4 = nn.BatchNorm2d(256)
         
         self.fc = nn.Linear(256 * 4 * 4, 1)
         self.dropout = nn.Dropout(0.3)
         
     def forward(self, x):
         x = F.leaky_relu(self.conv1(x), 0.2)
-        x = F.leaky_relu(self.conv2(x), 0.2)
-        x = F.leaky_relu(self.conv3(x), 0.2)
-        x = F.leaky_relu(self.conv4(x), 0.2)
+        x = F.leaky_relu(self.bn2(self.conv2(x)), 0.2)
+        x = F.leaky_relu(self.bn3(self.conv3(x)), 0.2)
+        x = F.leaky_relu(self.bn4(self.conv4(x)), 0.2)
         
         x = x.view(x.size(0), -1)
         x = self.dropout(x)
@@ -111,11 +122,11 @@ class Discriminator(nn.Module):
         return x
 
 class HandwritingCorrectionSystem:
-    def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    def __init__(self, latent_dim=128, num_fonts=10, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
-        self.num_fonts = 10
-        self.latent_dim = 128
-        self.font_dim = 10
+        self.num_fonts = num_fonts
+        self.latent_dim = latent_dim
+        self.font_dim = num_fonts
         
         self.generator = Generator(self.latent_dim, self.font_dim).to(device)
         self.discriminator = Discriminator().to(device)
@@ -147,7 +158,8 @@ class HandwritingCorrectionSystem:
     def train_step(self, real_images, source_images, target_font_ids):
         batch_size = real_images.size(0)
         
-        real_labels = torch.ones(batch_size, 1).to(self.device)
+        # One-sided Label Smoothing: 진짜 레이블을 1.0 대신 0.9로 설정
+        real_labels = torch.full((batch_size, 1), 0.9, dtype=torch.float, device=self.device)
         fake_labels = torch.zeros(batch_size, 1).to(self.device)
         
         font_vectors = []
@@ -271,14 +283,11 @@ def main():
     dataset = HangulDataset(image_paths=image_paths, font_labels=font_labels, transform=transform)
     data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     
-    system = HandwritingCorrectionSystem(device='cuda' if torch.cuda.is_available() else 'cpu')
-    system.num_fonts = num_fonts
-    system.font_dim = num_fonts
-    system.generator = Generator(system.latent_dim, system.font_dim).to(system.device)
-    system.discriminator = Discriminator().to(system.device)
-    system.g_optimizer = optim.Adam(system.generator.parameters(), lr=0.0002, betas=(0.5, 0.999))
-    system.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
-    system.font_embeddings = nn.Embedding(system.num_fonts, system.font_dim).to(system.device)
+    system = HandwritingCorrectionSystem(
+        num_fonts=num_fonts,
+        latent_dim=128, # latent_dim도 명시적으로 전달
+        device='cuda' if torch.cuda.is_available() else 'cpu'
+    )
 
     print("훈련을 시작합니다...")
     for epoch in range(epochs):
